@@ -54,7 +54,7 @@ function formatNumericText(value: string) {
 }
 
 function areaText(fields: Record<string, FirestoreValue>) {
-  const rawArea = firstTextField(fields, ['area']);
+  const rawArea = limitText(firstTextField(fields, ['area']), 30);
   if (!rawArea) return '';
 
   const numericArea = Number(rawArea);
@@ -62,6 +62,36 @@ function areaText(fields: Record<string, FirestoreValue>) {
 
   const alreadyHasUnit = /(?:م²|م2|متر|sqm|sq\.?\s*m|ft²|ft2|sq\.?\s*ft)/i.test(rawArea);
   return `${formatNumericText(rawArea)}${alreadyHasUnit ? '' : ' م²'}`;
+}
+
+function normalizedLabel(value: string) {
+  return value.trim().toLowerCase().replace(/[أإآ]/g, 'ا').replace(/ى/g, 'ي');
+}
+
+function isRentLabel(value: string) {
+  return /(?:^|[^a-z])(?:rent|rental|lease)(?:$|[^a-z])|(?:ايجار|استئجار|شهري|شهر|سنوي|سنة)|(?:^|[^a-z])(?:monthly|month|annual|yearly|year)(?:$|[^a-z])/i.test(normalizedLabel(value));
+}
+
+function isSaleLabel(value: string) {
+  return /(?:^|[^a-z])(?:sale|sell)(?:$|[^a-z])|بيع/i.test(normalizedLabel(value));
+}
+
+function rentPeriodFromFields(fields: Record<string, FirestoreValue>): 'monthly' | 'annual' {
+  const periodFields = ['rent_period', 'rental_period', 'lease_period', 'rentPeriod', 'payment_period', 'subType', 'offerType', 'offer_type', 'listing_type'];
+  for (const name of periodFields) {
+    const value = normalizedLabel(stringField(fields, name));
+    if (/(?:^|[^a-z])(?:monthly|month)(?:$|[^a-z])|شهري|شهر/i.test(value)) return 'monthly';
+    if (/(?:^|[^a-z])(?:annual|yearly|year)(?:$|[^a-z])|سنوي|سنة/i.test(value)) return 'annual';
+  }
+  return 'annual';
+}
+
+function isRentListing(fields: Record<string, FirestoreValue>) {
+  const listingFields = ['listing_type', 'listingType', 'subType', 'offerType', 'offer_type'];
+  const values = listingFields.map((name) => stringField(fields, name).trim()).filter(Boolean);
+  const recognized = values.find((value) => isRentLabel(value) || isSaleLabel(value));
+  if (recognized) return isRentLabel(recognized);
+  return values.some((value) => /(?:^|[^a-z])(?:monthly|month|annual|yearly|year)(?:$|[^a-z])|شهري|شهر|سنوي|سنة/i.test(normalizedLabel(value)));
 }
 
 function escapeHtml(value: string) {
@@ -81,10 +111,11 @@ function limitText(value: string, maxCharacters: number) {
   return Array.from(value.trim()).slice(0, maxCharacters).join('');
 }
 
-function isHttpsUrl(value: string) {
-  if (value.length > 2048) return false;
+function isDirectImageUrl(value: string) {
+  if (!value || value.length > 2048) return false;
   try {
-    return new URL(value).protocol === 'https:';
+    const protocol = new URL(value).protocol;
+    return protocol === 'https:' || protocol === 'http:';
   } catch {
     return false;
   }
@@ -94,29 +125,31 @@ function imageUrlFromValue(value?: FirestoreValue): string {
   if (!value) return '';
 
   const directValue = typeof value.stringValue === 'string' ? value.stringValue.trim() : '';
-  if (directValue && isHttpsUrl(directValue)) return directValue;
+  if (directValue && isDirectImageUrl(directValue)) return directValue;
 
   const nestedFields = value.mapValue?.fields;
   if (!nestedFields) return '';
 
   for (const key of ['url', 'imageUrl', 'image_url', 'src', 'downloadURL', 'downloadUrl']) {
-    const candidate = nestedFields[key]?.stringValue?.trim() ?? '';
-    if (candidate && isHttpsUrl(candidate)) return candidate;
+    const candidate = nestedFields[key];
+    const directCandidate = candidate?.stringValue?.trim() ?? '';
+    if (directCandidate && isDirectImageUrl(directCandidate)) return directCandidate;
+    const nestedCandidate = imageUrlFromValue(candidate);
+    if (nestedCandidate) return nestedCandidate;
   }
   return '';
 }
 
 function firstImageUrl(fields: Record<string, FirestoreValue>) {
-  const singleImage = imageUrlFromValue(fields.imageUrl)
-    || imageUrlFromValue(fields.image_url);
-  if (singleImage) return singleImage;
-
-  const imageList = fields.images?.arrayValue?.values ?? [];
-  for (const image of imageList) {
-    const candidate = imageUrlFromValue(image);
-    if (candidate) return candidate;
+  for (const name of ['imageUrl', 'image_url', 'imageURL', 'images', 'photos', 'imageUrls', 'photo']) {
+    const value = fields[name];
+    const candidates = value?.arrayValue?.values ?? (value ? [value] : []);
+    for (const candidate of candidates) {
+      const imageUrl = imageUrlFromValue(candidate);
+      if (imageUrl) return imageUrl;
+    }
   }
-  return imageUrlFromValue(fields.images);
+  return '';
 }
 
 function parseBody(body: unknown): Record<string, unknown> | null {
@@ -200,8 +233,10 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
 
     const title = limitText(stringField(fields, 'title') || 'عقار جديد', 140);
     const propertyType = limitText(stringField(fields, 'property_type') || 'غير محدد', 60);
-    const listingType = stringField(fields, 'listing_type') === 'rent' ? 'للإيجار' : 'للبيع';
-    const price = `${new Intl.NumberFormat('ar-SA').format(numberField(fields, 'price'))} ر.س`;
+    const rentPeriod = rentPeriodFromFields(fields);
+    const isRent = isRentListing(fields);
+    const listingLabel = isRent ? `للإيجار (${rentPeriod === 'monthly' ? 'شهري' : 'سنوي'})` : 'للبيع';
+    const price = `${new Intl.NumberFormat('ar-SA').format(numberField(fields, 'price'))} ر.س${isRent ? ` ${rentPeriod === 'monthly' ? 'شهرياً' : 'سنوياً'}` : ''}`;
     const city = limitText(stringField(fields, 'city'), 60);
     const district = limitText(stringField(fields, 'district'), 60);
     const serialNumber = numberField(fields, 'serial_number');
@@ -223,7 +258,7 @@ const apartmentLines = isApartment
           ].map(([label, keys]) => {
             const value = firstTextField(fields, keys as string[]);
             return value
-              ? `${label}: ${escapeHtml(formatNumericText(value))}`
+              ? `${label}: ${escapeHtml(formatNumericText(limitText(value, 30)))}`
               : '';
           }),
         ]
@@ -232,7 +267,7 @@ const apartmentLines = isApartment
     const message = [
       '<b>🏡 إعلان عقاري جديد</b>',
       `<b>${escapeHtml(title)}</b>`,
-      `النوع: ${escapeHtml(propertyType)} — ${listingType}`,
+      `النوع: ${escapeHtml(propertyType)} — ${listingLabel}`,
       `السعر: ${price}`,
       area ? `المساحة: ${escapeHtml(area)}` : '',
       ...apartmentLines,
