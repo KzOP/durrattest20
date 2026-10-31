@@ -12,21 +12,56 @@ type FirestoreValue = {
   integerValue?: string;
   doubleValue?: number;
   arrayValue?: { values?: FirestoreValue[] };
+  mapValue?: { fields?: Record<string, FirestoreValue> };
 };
 
 type FirestoreDocument = {
   fields?: Record<string, FirestoreValue>;
 };
 
+const PRODUCTION_APP_URL = 'https://durrattest18.vercel.app';
+
 function stringField(fields: Record<string, FirestoreValue>, name: string) {
   const value = fields[name]?.stringValue;
   return typeof value === 'string' ? value : '';
+}
+
+function firstTextField(fields: Record<string, FirestoreValue>, names: string[]) {
+  for (const name of names) {
+    const value = fields[name];
+    if (typeof value?.stringValue === 'string' && value.stringValue.trim()) {
+      return value.stringValue.trim();
+    }
+    if (typeof value?.integerValue === 'string') return value.integerValue;
+    if (typeof value?.doubleValue === 'number' && Number.isFinite(value.doubleValue)) {
+      return String(value.doubleValue);
+    }
+  }
+  return '';
 }
 
 function numberField(fields: Record<string, FirestoreValue>, name: string) {
   const value = fields[name];
   const number = value?.doubleValue ?? Number(value?.integerValue);
   return Number.isFinite(number) ? number : 0;
+}
+
+function formatNumericText(value: string) {
+  const number = Number(value);
+  return value.trim() && Number.isFinite(number)
+    ? new Intl.NumberFormat('ar-SA', { maximumFractionDigits: 2 }).format(number)
+    : value;
+}
+
+function areaText(fields: Record<string, FirestoreValue>) {
+  const rawArea = firstTextField(fields, ['area']);
+  if (!rawArea) return '';
+
+  const numericArea = Number(rawArea);
+  if (Number.isFinite(numericArea) && numericArea <= 0) return '';
+
+  const alreadyHasUnit = /(?:م²|م2|متر|sqm|sq\.?\s*m|ft²|ft2|sq\.?\s*ft)/i.test(rawArea);
+  return `${formatNumericText(rawArea)}${alreadyHasUnit ? '' : ' م²'}`;
 }
 
 function escapeHtml(value: string) {
@@ -40,6 +75,48 @@ function escapeHtml(value: string) {
     };
     return entities[character];
   });
+}
+
+function limitText(value: string, maxCharacters: number) {
+  return Array.from(value.trim()).slice(0, maxCharacters).join('');
+}
+
+function isHttpsUrl(value: string) {
+  if (value.length > 2048) return false;
+  try {
+    return new URL(value).protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+function imageUrlFromValue(value?: FirestoreValue): string {
+  if (!value) return '';
+
+  const directValue = typeof value.stringValue === 'string' ? value.stringValue.trim() : '';
+  if (directValue && isHttpsUrl(directValue)) return directValue;
+
+  const nestedFields = value.mapValue?.fields;
+  if (!nestedFields) return '';
+
+  for (const key of ['url', 'imageUrl', 'image_url', 'src', 'downloadURL', 'downloadUrl']) {
+    const candidate = nestedFields[key]?.stringValue?.trim() ?? '';
+    if (candidate && isHttpsUrl(candidate)) return candidate;
+  }
+  return '';
+}
+
+function firstImageUrl(fields: Record<string, FirestoreValue>) {
+  const singleImage = imageUrlFromValue(fields.imageUrl)
+    || imageUrlFromValue(fields.image_url);
+  if (singleImage) return singleImage;
+
+  const imageList = fields.images?.arrayValue?.values ?? [];
+  for (const image of imageList) {
+    const candidate = imageUrlFromValue(image);
+    if (candidate) return candidate;
+  }
+  return imageUrlFromValue(fields.images);
 }
 
 function parseBody(body: unknown): Record<string, unknown> | null {
@@ -89,7 +166,9 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       },
     );
     if (!identityResponse.ok) return res.status(401).json({ error: 'Unauthorized' });
-    const identity = await identityResponse.json() as { users?: Array<{ localId?: string; disabled?: boolean }> };
+    const identity = await identityResponse.json() as {
+      users?: Array<{ localId?: string; disabled?: boolean }>;
+    };
     const user = identity.users?.[0];
     const uid = user?.localId;
     if (!uid || user.disabled === true) return res.status(401).json({ error: 'Unauthorized' });
@@ -119,105 +198,81 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       return res.status(403).json({ error: 'Property owner required' });
     }
 
-    const title = stringField(fields, 'title') || 'عقار جديد';
-    const propertyType = stringField(fields, 'property_type') || 'غير محدد';
+    const title = limitText(stringField(fields, 'title') || 'عقار جديد', 140);
+    const propertyType = limitText(stringField(fields, 'property_type') || 'غير محدد', 60);
     const listingType = stringField(fields, 'listing_type') === 'rent' ? 'للإيجار' : 'للبيع';
-    const priceNum = numberField(fields, 'price');
-    const price = priceNum > 0 ? `${new Intl.NumberFormat('ar-SA').format(priceNum)} ر.س` : '0 ر.س';
-    
-    // جلب المساحة (دعم حقل area)
-    const areaVal = numberField(fields, 'area');
-    const area = areaVal > 0 ? `${new Intl.NumberFormat('ar-SA').format(areaVal)} م²` : 'غير مسجلة';
-
-    const city = stringField(fields, 'city');
-    const district = stringField(fields, 'district');
+    const price = `${new Intl.NumberFormat('ar-SA').format(numberField(fields, 'price'))} ر.س`;
+    const city = limitText(stringField(fields, 'city'), 60);
+    const district = limitText(stringField(fields, 'district'), 60);
     const serialNumber = numberField(fields, 'serial_number');
+    const area = areaText(fields);
+    const detailsUrl = `${PRODUCTION_APP_URL}/?property=${encodeURIComponent(propertyId)}`;
+    const normalizedType = propertyType.toLowerCase();
+    const isApartment = normalizedType.includes('apartment')
+      || propertyType.includes('شقة')
+      || propertyType.includes('شقق');
 
-    // استخراج رابط الصورة الأولى (دعم imageUrl أو مصفوفة صور images)
-    let imageUrl = stringField(fields, 'imageUrl') || stringField(fields, 'image');
-    if (!imageUrl && fields.images?.arrayValue?.values) {
-      const firstImgObj = fields.images.arrayValue.values[0];
-      if (firstImgObj?.stringValue) {
-        imageUrl = firstImgObj.stringValue;
-      }
-    }
+    const apartmentLines = isApartment
+      ? [
+          ['غرف النوم', ['bedrooms', 'bedroom_count', 'rooms']],
+          ['الصالات', ['lounges', 'living_rooms', 'halls']],
+          ['المطابخ', ['kitchens', 'kitchen_count']],
+          ['دورات المياه', ['bathrooms', 'bathroom_count', 'baths']],
+        ].map(([label, keys]) => {
+          const value = firstTextField(fields, keys as string[]);
+          return value
+            ? `${label}: ${escapeHtml(formatNumericText(value))}`
+            : '';
+        })
+      : [];
 
-    // تجهيز رابط تفاصيل العقار ليفتح عند النقر على الصورة
-    const baseUrl = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://durratalhijarh.vercel.app';
-    const propertyLink = `${baseUrl}/?property=${propertyId}`;
-
-    // بناء رسالة تيليجرام بالتنسيق المطلوب
-    let message = [
+    const message = [
       '<b>🏡 إعلان عقاري جديد</b>',
       `<b>${escapeHtml(title)}</b>`,
       `النوع: ${escapeHtml(propertyType)} — ${listingType}`,
       `السعر: ${price}`,
-      `المساحة: ${area}`,
-      city || district ? `الموقع: ${escapeHtml([city, district].filter(Boolean).join(' — '))}` : '',
-    ];
+      area ? `المساحة: ${escapeHtml(area)}` : '',
+      ...apartmentLines,
+      city || district
+        ? `الموقع: ${escapeHtml([city, district].filter(Boolean).join(' — '))}`
+        : '',
+      serialNumber
+        ? `رقم الإعلان: ${new Intl.NumberFormat('ar-SA').format(serialNumber)}`
+        : '',
+      `<a href="${escapeHtml(detailsUrl)}">عرض تفاصيل العقار</a>`,
+    ].filter(Boolean).join('\n');
 
-    // إضافة تفاصيل الشقق حصرياً إذا كان العقار شقة
-    const isApartment = propertyType.includes('شقة') || propertyType.toLowerCase().includes('apartment');
-    if (isApartment) {
-      const rooms = numberField(fields, 'rooms') || numberField(fields, 'bedrooms');
-      const halls = numberField(fields, 'halls') || numberField(fields, 'livingRooms');
-      const kitchens = numberField(fields, 'kitchens');
-      const bathrooms = numberField(fields, 'bathrooms');
-
-      message.push(
-        '',
-        '<b>🛋️ تفاصيل الشقة:</b>',
-        `▫️ غرف النوم: ${rooms || 'غير محدد'}`,
-        `▫️ الصالات: ${halls || 'غير محدد'}`,
-        `▫️ المطابخ: ${kitchens || 'غير محدد'}`,
-        `▫️ دورات المياه: ${bathrooms || 'غير محدد'}`
-      );
-    }
-
-    if (serialNumber) {
-      message.push(`رقم الإعلان: ${new Intl.NumberFormat('ar-SA').format(serialNumber)}`);
-    }
-
-    // إضافة زر أو رابط المعاينة في آخر النص
-    message.push('', `🔗 <a href="${propertyLink}">للتفاصيل والمعاينة عبر الموقع</a>`);
-
-    const finalMessageText = message.filter(Boolean).join('\n');
-
-    let telegramResponse;
-
-    // إذا وُجدت صورة، نستخدم sendPhoto لتظهر الصورة في الأعلى مع النص والرابط
-    if (imageUrl) {
-      telegramResponse = await fetch(`https://api.telegram.org/bot${botToken}/sendPhoto`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+    const imageUrl = firstImageUrl(fields);
+    const telegramMethod = imageUrl ? 'sendPhoto' : 'sendMessage';
+    const telegramPayload = imageUrl
+      ? {
           chat_id: chatId,
           photo: imageUrl,
-          caption: finalMessageText,
+          caption: message,
           parse_mode: 'HTML',
-        }),
-      });
-    } else {
-      // إذا لم توجد صورة، نرسل رسالة نصية طبيعية
-      telegramResponse = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+        }
+      : {
+          chat_id: chatId,
+          text: message,
+          parse_mode: 'HTML',
+          disable_web_page_preview: true,
+        };
+
+    const telegramResponse = await fetch(
+      `https://api.telegram.org/bot${botToken}/${telegramMethod}`,
+      {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: chatId,
-          text: finalMessageText,
-          parse_mode: 'HTML',
-          disable_web_page_preview: false,
-        }),
-      });
-    }
-
+        body: JSON.stringify(telegramPayload),
+      },
+    );
     const telegramResult = await telegramResponse.json() as { ok?: boolean };
     if (!telegramResponse.ok || telegramResult.ok !== true) {
       return res.status(502).json({ error: 'Telegram rejected the message' });
     }
 
     return res.status(200).json({ sent: true });
-  } catch (err) {
+  } catch {
     return res.status(502).json({ error: 'Notification service unavailable' });
   }
 }
