@@ -11,6 +11,7 @@ type FirestoreValue = {
   booleanValue?: boolean;
   integerValue?: string;
   doubleValue?: number;
+  arrayValue?: { values?: FirestoreValue[] };
 };
 
 type FirestoreDocument = {
@@ -121,36 +122,102 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     const title = stringField(fields, 'title') || 'عقار جديد';
     const propertyType = stringField(fields, 'property_type') || 'غير محدد';
     const listingType = stringField(fields, 'listing_type') === 'rent' ? 'للإيجار' : 'للبيع';
-    const price = `${new Intl.NumberFormat('ar-SA').format(numberField(fields, 'price'))} ر.س`;
+    const priceNum = numberField(fields, 'price');
+    const price = priceNum > 0 ? `${new Intl.NumberFormat('ar-SA').format(priceNum)} ر.س` : '0 ر.س';
+    
+    // جلب المساحة (دعم حقل area)
+    const areaVal = numberField(fields, 'area');
+    const area = areaVal > 0 ? `${new Intl.NumberFormat('ar-SA').format(areaVal)} م²` : 'غير مسجلة';
+
     const city = stringField(fields, 'city');
     const district = stringField(fields, 'district');
     const serialNumber = numberField(fields, 'serial_number');
-    const message = [
+
+    // استخراج رابط الصورة الأولى (دعم imageUrl أو مصفوفة صور images)
+    let imageUrl = stringField(fields, 'imageUrl') || stringField(fields, 'image');
+    if (!imageUrl && fields.images?.arrayValue?.values) {
+      const firstImgObj = fields.images.arrayValue.values[0];
+      if (firstImgObj?.stringValue) {
+        imageUrl = firstImgObj.stringValue;
+      }
+    }
+
+    // تجهيز رابط تفاصيل العقار ليفتح عند النقر على الصورة
+    const baseUrl = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://durratalhijarh.vercel.app';
+    const propertyLink = `${baseUrl}/?property=${propertyId}`;
+
+    // بناء رسالة تيليجرام بالتنسيق المطلوب
+    let message = [
       '<b>🏡 إعلان عقاري جديد</b>',
       `<b>${escapeHtml(title)}</b>`,
       `النوع: ${escapeHtml(propertyType)} — ${listingType}`,
       `السعر: ${price}`,
+      `المساحة: ${area}`,
       city || district ? `الموقع: ${escapeHtml([city, district].filter(Boolean).join(' — '))}` : '',
-      serialNumber ? `رقم الإعلان: ${new Intl.NumberFormat('ar-SA').format(serialNumber)}` : '',
-    ].filter(Boolean).join('\n');
+    ];
 
-    const telegramResponse = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: message,
-        parse_mode: 'HTML',
-        disable_web_page_preview: true,
-      }),
-    });
+    // إضافة تفاصيل الشقق حصرياً إذا كان العقار شقة
+    const isApartment = propertyType.includes('شقة') || propertyType.toLowerCase().includes('apartment');
+    if (isApartment) {
+      const rooms = numberField(fields, 'rooms') || numberField(fields, 'bedrooms');
+      const halls = numberField(fields, 'halls') || numberField(fields, 'livingRooms');
+      const kitchens = numberField(fields, 'kitchens');
+      const bathrooms = numberField(fields, 'bathrooms');
+
+      message.push(
+        '',
+        '<b>🛋️ تفاصيل الشقة:</b>',
+        `▫️ غرف النوم: ${rooms || 'غير محدد'}`,
+        `▫️ الصالات: ${halls || 'غير محدد'}`,
+        `▫️ المطابخ: ${kitchens || 'غير محدد'}`,
+        `▫️ دورات المياه: ${bathrooms || 'غير محدد'}`
+      );
+    }
+
+    if (serialNumber) {
+      message.push(`رقم الإعلان: ${new Intl.NumberFormat('ar-SA').format(serialNumber)}`);
+    }
+
+    // إضافة زر أو رابط المعاينة في آخر النص
+    message.push('', `🔗 <a href="${propertyLink}">للتفاصيل والمعاينة عبر الموقع</a>`);
+
+    const finalMessageText = message.filter(Boolean).join('\n');
+
+    let telegramResponse;
+
+    // إذا وُجدت صورة، نستخدم sendPhoto لتظهر الصورة في الأعلى مع النص والرابط
+    if (imageUrl) {
+      telegramResponse = await fetch(`https://api.telegram.org/bot${botToken}/sendPhoto`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          photo: imageUrl,
+          caption: finalMessageText,
+          parse_mode: 'HTML',
+        }),
+      });
+    } else {
+      // إذا لم توجد صورة، نرسل رسالة نصية طبيعية
+      telegramResponse = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text: finalMessageText,
+          parse_mode: 'HTML',
+          disable_web_page_preview: false,
+        }),
+      });
+    }
+
     const telegramResult = await telegramResponse.json() as { ok?: boolean };
     if (!telegramResponse.ok || telegramResult.ok !== true) {
       return res.status(502).json({ error: 'Telegram rejected the message' });
     }
 
     return res.status(200).json({ sent: true });
-  } catch {
+  } catch (err) {
     return res.status(502).json({ error: 'Notification service unavailable' });
   }
 }
