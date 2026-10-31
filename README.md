@@ -35,3 +35,4 @@ pnpm build
 ## حدود النسخة
 
 إدارة حسابات الموظفين لا تزال خارج الواجهة. إشعار تيليجرام يستخدم Vercel Function مستقلة، ولا يتطلب Firebase Admin private key؛ يتحقق من هوية الموظف عبر Firebase ويقرأ وثائقه باستخدام قواعد Firestore الحالية.
+Production deploy update
