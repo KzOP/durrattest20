@@ -212,18 +212,21 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       || propertyType.includes('شقة')
       || propertyType.includes('شقق');
 
- const apartmentLines = isApartment
+const apartmentLines = isApartment
       ? [
-          ['غرف النوم', ['bedrooms', 'bedroom_count', 'rooms']],
-          ['الصالات', ['lounges', 'living_rooms', 'halls']],
-          ['المطابخ', ['kitchens', 'kitchen_count']],
-          ['دورات المياه', ['bathrooms', 'bathroom_count', 'baths']],
-        ].map(([label, keys]) => {
-          const value = firstTextField(fields, keys as string[]);
-          return value
-            ? `${label}: ${escapeHtml(formatNumericText(value))}`
-            : '';
-        })
+          '', // سطر فارغ جمالي قبل تفاصيل الشقة
+          ...[
+            ['غرف النوم', ['bedrooms', 'bedroom_count', 'rooms']],
+            ['الصالات', ['lounges', 'living_rooms', 'halls']],
+            ['المطابخ', ['kitchens', 'kitchen_count']],
+            ['دورات المياه', ['bathrooms', 'bathroom_count', 'baths']],
+          ].map(([label, keys]) => {
+            const value = firstTextField(fields, keys as string[]);
+            return value
+              ? `${label}: ${escapeHtml(formatNumericText(value))}`
+              : '';
+          }),
+        ]
       : [];
 
     const message = [
@@ -239,9 +242,9 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       serialNumber
         ? `رقم الإعلان: ${new Intl.NumberFormat('ar-SA').format(serialNumber)}`
         : '',
+      '', // سطر فارغ جمالي قبل الرابط ليكون مفصولاً تماماً مثل صورتك
       `<a href="${escapeHtml(detailsUrl)}">عرض تفاصيل العقار</a>`,
-    ].filter(Boolean).join('\n');
-
+    ].filter(Boolean).flat().join('\n');
     const imageUrl = firstImageUrl(fields);
     const telegramMethod = imageUrl ? 'sendPhoto' : 'sendMessage';
     const telegramPayload = imageUrl
