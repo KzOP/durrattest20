@@ -212,7 +212,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       || propertyType.includes('شقة')
       || propertyType.includes('شقق');
 
-    const apartmentLines = isApartment
+ const apartmentLines = isApartment
       ? [
           ['غرف النوم', ['bedrooms', 'bedroom_count', 'rooms']],
           ['الصالات', ['lounges', 'living_rooms', 'halls']],
