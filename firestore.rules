@@ -22,8 +22,11 @@ service cloud.firestore {
 
     match /employees/{uid} {
       allow get: if signedIn() && request.auth.uid == uid;
-      allow list: if false;
-      allow create, update, delete: if false;
+      allow list: if superAdmin();
+      allow create, update: if superAdmin()
+        && request.resource.data.keys().hasOnly(['displayName', 'phone', 'role', 'active'])
+        && request.resource.data.role in ['employee', 'super_admin'];
+      allow delete: if superAdmin() && request.auth.uid != uid;
     }
 
     match /properties/{propertyId} {
@@ -31,6 +34,17 @@ service cloud.firestore {
       allow create: if activeStaff()
         && request.resource.data.created_by_staff_id == request.auth.uid;
       allow update: if activeStaff()
+        && request.resource.data.created_by_staff_id == resource.data.created_by_staff_id;
+      allow delete: if activeStaff()
+        && (superAdmin() || resource.data.created_by_staff_id == request.auth.uid);
+    }
+
+    match /property_owners/{propertyId} {
+      allow read: if activeStaff();
+      allow create: if activeStaff()
+        && (superAdmin() || request.resource.data.created_by_staff_id == request.auth.uid);
+      allow update: if activeStaff()
+        && (superAdmin() || resource.data.created_by_staff_id == request.auth.uid)
         && request.resource.data.created_by_staff_id == resource.data.created_by_staff_id;
       allow delete: if activeStaff()
         && (superAdmin() || resource.data.created_by_staff_id == request.auth.uid);

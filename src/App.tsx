@@ -7,27 +7,29 @@ import { getDownloadURL, ref as storageRef, uploadString } from 'firebase/storag
 import { CircleMarker, MapContainer, Marker, Popup, TileLayer, useMap, useMapEvents } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import {
-  Building2, ChevronDown, ExternalLink, Eye, FilePenLine,
-  LockKeyhole, MapPin, Menu, MessageCircle, Moon, Plus, Search,
-  Sun, Trash2, X, Layers3,
-  MapPinned, Navigation, Share2, Phone, ClipboardList, LayoutGrid, RefreshCw
-} from 'lucide-react';
+import { Building2, ChevronDown, ExternalLink, Eye, FilePenLine, LockKeyhole, MapPin, Menu, MessageCircle, Moon, Plus, Search, Sun, Trash2, X, Layers as Layers3, MapPinned, Navigation, Share2, Phone, ClipboardList, LayoutGrid, RefreshCw, Users } from 'lucide-react';
 import { createPortal } from 'react-dom';
+import { StaffManager } from '@/components/staff-manager';
+import { OwnerInfo } from '@/components/owner-info';
+import { formatListingLabel, formatPrice, type RentPeriod } from '@/lib/listing-format';
+import { loadPropertyOwner, savePropertyOwner } from '@/lib/property-owner';
+import { publisherPhone, whatsappUrl } from '@/lib/whatsapp';
+import { watermarkImage } from '@/lib/watermark';
 
-type RentPeriod = 'monthly' | 'annual';
 type Staff = { id: string; display_name: string; phone: string; role: 'employee' | 'super_admin'; active: boolean };
 type Property = {
-  id: string; created_by_staff_id: string | null; created_by_name: string; contact_phone: string;
+  id: string; created_by_staff_id: string | null; created_by_name: string; publisher_name?: string; publisher_phone?: string; contact_phone?: string;
   listing_type: 'sale' | 'rent'; rent_period?: RentPeriod; property_type: string; title: string; city: string; district: string;
   street: string; price: number; area: number; rooms: number; lounges: number; floors: number; kitchens: number;
   bathrooms: number; floor_number: number; has_roof: boolean; has_elevator: boolean; notes: string;
   latitude: number | null; longitude: number | null; images: string[]; published: boolean;
   created_at: string; serial_number?: number;
 };
-type FormState = Omit<Property, 'id' | 'created_by_staff_id' | 'created_by_name' | 'contact_phone' | 'created_at' | 'telegram_posted'> & { images: string[] };
+type FormState = Omit<Property, 'id' | 'created_by_staff_id' | 'created_by_name' | 'publisher_name' | 'publisher_phone' | 'contact_phone' | 'created_at'> & {
+  images: string[]; owner_name: string; owner_phone: string;
+};
 
-const officePhone = '0539000650';
+const officePhone = '0569996744';
 const whatsappNumber = '0569996744';
 const logo = '/images/image.png';
 const allPropertyTypes = ['شقة', 'فيلا', 'أرض', 'دور', 'عمارة', 'محل', 'مزرعة', 'حوش', 'ستوديو', 'بيت', 'أرض خام', 'أرض تجارية'];
@@ -62,18 +64,8 @@ const initialForm: FormState = {
   listing_type: 'sale', rent_period: 'annual', property_type: 'شقة', title: '', city: '', district: '', street: '', price: 0,
   area: 0, rooms: 0, lounges: 0, floors: 0, kitchens: 0, bathrooms: 0, floor_number: 0, has_roof: false,
   has_elevator: false, notes: '', latitude: null, longitude: null, images: [], published: true,
+  owner_name: '', owner_phone: '',
 };
-
-function formatPrice(price: number, listingType: string, rentPeriod?: RentPeriod) {
-  const amount = new Intl.NumberFormat('ar-SA').format(price) + ' ر.س';
-  if (listingType !== 'rent') return amount;
-  return amount + ' ' + (rentPeriod === 'monthly' ? 'شهرياً' : 'سنوياً');
-}
-
-function formatListingLabel(listingType: string, rentPeriod?: RentPeriod) {
-  if (listingType !== 'rent') return 'للبيع';
-  return 'للإيجار (' + (rentPeriod === 'monthly' ? 'شهري' : 'سنوي') + ')';
-}
 
 function MapClickHandler({ onSelect }: { onSelect: (latitude: number, longitude: number) => void }) {
   useMapEvents({ click: ({ latlng }) => onSelect(latlng.lat, latlng.lng) });
@@ -154,33 +146,6 @@ function FloatingMap({ properties, onSelect }: { properties: Property[]; onSelec
   );
 }
 
-async function watermarkImage(file: File): Promise<string> {
-  const source = await createImageBitmap(file);
-  const canvas = document.createElement('canvas');
-  const maxWidth = 1600;
-  const scale = Math.min(1, maxWidth / source.width);
-  canvas.width = source.width * scale;
-  canvas.height = source.height * scale;
-  const context = canvas.getContext('2d');
-  if (!context) throw new Error('canvas');
-  context.drawImage(source, 0, 0, canvas.width, canvas.height);
-  const fontSize = Math.max(20, canvas.width / 26);
-  context.save();
-  context.font = `700 ${fontSize}px Arial`;
-  context.textAlign = 'right';
-  context.textBaseline = 'bottom';
-  context.globalAlpha = 0.5;
-  context.lineWidth = Math.max(3, fontSize / 9);
-  context.strokeStyle = 'rgba(255,255,255,.85)';
-  context.fillStyle = '#8a6d2f';
-  const x = canvas.width - Math.max(24, canvas.width / 36);
-  const y = canvas.height - Math.max(22, canvas.height / 28);
-  context.strokeText('درة الهجرة للعقارات', x, y);
-  context.fillText('درة الهجرة للعقارات', x, y);
-  context.restore();
-  return canvas.toDataURL('image/jpeg', 0.82);
-}
-
 function withTimeout<T>(promise: Promise<T>, milliseconds: number): Promise<T> {
   return new Promise((resolve, reject) => {
     const timer = window.setTimeout(() => reject(new Error('timeout')), milliseconds);
@@ -252,7 +217,7 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [filters, setFilters] = useState({ search: '' });
   const [staff, setStaff] = useState<Staff | null>(null);
-  const [modal, setModal] = useState<'login' | 'form' | 'details' | null>(null);
+  const [modal, setModal] = useState<'login' | 'form' | 'details' | 'staff' | null>(null);
   const [selected, setSelected] = useState<Property | null>(null);
   const [loginMessage, setLoginMessage] = useState('');
   const [helpVisible, setHelpVisible] = useState(true);
@@ -342,7 +307,7 @@ function App() {
 
   const updateForm = (key: keyof FormState, value: string | number | boolean | null | string[]) => setForm((current) => ({ ...current, [key]: value }));
   const scrollToListings = () => document.getElementById('listings')?.scrollIntoView({ behavior: 'smooth' });
-  const openNewForm = () => { setForm(initialForm); setModal('form'); };
+  const openNewForm = () => { setForm(initialForm); setSelected(null); setModal('form'); };
   const openEditForm = (property: Property) => {
     setForm({
       listing_type: property.listing_type, rent_period: property.rent_period ?? 'annual', property_type: property.property_type, title: property.title,
@@ -351,7 +316,13 @@ function App() {
       bathrooms: property.bathrooms, floor_number: property.floor_number, has_roof: property.has_roof,
       has_elevator: property.has_elevator, notes: property.notes, latitude: property.latitude,
       longitude: property.longitude, images: property.images, published: property.published,
-    }); setSelected(property); setModal('form');
+      owner_name: '', owner_phone: '',
+    });
+    setSelected(property);
+    setModal('form');
+    void loadPropertyOwner(property.id)
+      .then((owner) => { if (owner) setForm((current) => ({ ...current, ...owner })); })
+      .catch(() => setNotice('تعذر تحميل بيانات المالك. أدخلها من جديد قبل الحفظ.'));
   };
 
   const handleLogin = async (event: FormEvent<HTMLFormElement>) => {
@@ -423,12 +394,24 @@ function App() {
     event.preventDefault(); if (!staff || saving) return;
     setSaving(true); setNotice('');
     try {
+      const { owner_name, owner_phone, ...propertyFields } = form;
       const propertyRef = selected ? doc(db, 'properties', selected.id) : doc(collection(db, 'properties'));
       const imageUrls = await uploadWatermarkedImages(propertyRef.id, form.images);
       const isEditing = Boolean(selected);
       const serialNumber = selected?.serial_number ?? (properties.length > 0 ? Math.max(...properties.map((p) => p.serial_number ?? 0)) + 1 : 1);
-      const payload = { ...form, images: imageUrls, serial_number: serialNumber, created_by_staff_id: staff.id, created_by_name: staff.display_name, contact_phone: staff.phone, created_at: selected?.created_at ?? new Date().toISOString() };
+      const creatorId = selected?.created_by_staff_id ?? staff.id;
+      const payload = {
+        ...propertyFields,
+        images: imageUrls,
+        serial_number: serialNumber,
+        created_by_staff_id: creatorId,
+        created_by_name: selected?.created_by_name ?? staff.display_name,
+        publisher_name: selected ? (selected.publisher_name || selected.created_by_name) : staff.display_name,
+        publisher_phone: selected ? (selected.publisher_phone || selected.contact_phone || '') : staff.phone,
+        created_at: selected?.created_at ?? new Date().toISOString(),
+      };
       await setDoc(propertyRef, payload);
+      await savePropertyOwner(propertyRef.id, creatorId, { owner_name: owner_name.trim(), owner_phone: owner_phone.trim() });
       let saveMessage = isEditing ? 'تم تحديث العقار بنجاح.' : 'تم حفظ العقار بنجاح.';
       if (!isEditing) {
         try {
@@ -450,6 +433,7 @@ function App() {
     if (!staff || (!isAdmin && property.created_by_staff_id !== staff.id) || !window.confirm('هل تريد حذف هذا العقار؟')) return;
     try {
       await deleteDoc(doc(db, 'properties', property.id));
+      await deleteDoc(doc(db, 'property_owners', property.id)).catch(() => undefined);
       setNotice('تم حذف العقار من الموقع.');
     } catch {
       setNotice('تعذر حذف العقار.');
@@ -473,7 +457,7 @@ function App() {
           <div className="dashboard-heading"><span className="eyebrow">منصة درة الهجرة</span><h1>عروضي العقارية</h1><p>كل عروضك العقارية في مكان واحد، بوضوح وسهولة.</p></div>
           <a className="office-location" href="https://goo.gl/maps/hP8rVmqhAiBm2XRcA" target="_blank" rel="noreferrer"><MapPin size={18} /><span>موقع<br /><b>المكتب</b></span></a>
           <div className="work-hours-note"><Phone size={15} /><span>يمكنكم الاتصال بنا في أوقات العمل الرسمية<br /><b>9ص-12م، العصر-12ص</b></span></div><div className="stats-grid"><div className="stat-card"><span className="stat-icon"><LayoutGrid size={17} /></span><strong>{properties.length}</strong><small>إجمالي العروض</small></div><div className="stat-card"><span className="stat-icon"><MapPin size={17} /></span><strong>{properties.filter((property) => property.latitude !== null).length}</strong><small>على الخريطة</small></div><div className="stat-card work-hours-card"><span className="stat-icon"><Phone size={17} /></span><strong>ساعات العمل</strong><small>9ص-12م · العصر-12ص</small></div></div>
-          <div className="contact-cards"><a className="whatsapp-banner" href={`https://wa.me/966${whatsappNumber.replace(/^0/, '')}`} target="_blank" rel="noreferrer"><span className="contact-symbol"><MessageCircle size={31} /></span><span><small>التواصل عبر الواتساب</small><b>{whatsappNumber}</b></span><ChevronDown size={24} className="contact-arrow" /></a><div className="license-banner"><span className="license-symbol"><ClipboardList size={30} /></span><span><small>رقم الرخصة العقارية</small><b>{licenseNumber}</b></span></div></div>
+          <div className="contact-cards"><a className="whatsapp-banner" href={whatsappUrl(whatsappNumber)} target="_blank" rel="noreferrer"><span className="contact-symbol"><MessageCircle size={31} /></span><span><small>التواصل عبر الواتساب</small><b>{whatsappNumber}</b></span><ChevronDown size={24} className="contact-arrow" /></a><div className="license-banner"><span className="license-symbol"><ClipboardList size={30} /></span><span><small>رقم الرخصة العقارية</small><b>{licenseNumber}</b></span></div></div>
           <div className="dashboard-footer"><span>تواصل معنا لإضافة العروض والطلبات</span><span>آخر تحديث: {new Intl.DateTimeFormat('ar-SA', { dateStyle: 'medium' }).format(new Date())}</span></div>
         </section>
 
@@ -485,21 +469,22 @@ function App() {
 
         <FloatingMap properties={visibleProperties} onSelect={(property) => { setSelected(property); setModal('details'); }} />
 
-        <section className="listings-section listing-results"><div className="section-top"><div><span className="eyebrow">مكتبة العروض</span><h2>العروض العقارية</h2></div><div className="section-actions">{staff && <button className="primary-button small" onClick={openNewForm}><Plus size={17} /> إضافة عقار</button>}</div></div><div className="results-meta"><span>{visibleProperties.length} عرض متاح</span><button className="refresh-button" onClick={() => window.location.reload()}><RefreshCw size={14} /> تحديث</button></div>
-          {loading ? <div className="empty-state"><span className="loader" /> جاري تحميل العقارات</div> : visibleProperties.length === 0 ? <div className="empty-state"><Building2 size={38} /><p>لا توجد عقارات مطابقة للبحث</p><small>جرّب تغيير خيارات البحث أو التصنيف.</small></div> : <div className="property-grid">{visibleProperties.map((property) => <article className="property-card" key={property.id}><div className="card-topline"><span className="serial-badge">#{property.serial_number ?? '—'}</span><span className={`listing-badge ${property.listing_type}`}>{formatListingLabel(property.listing_type, property.rent_period)}</span></div><button className="card-image" onClick={() => { setSelected(property); setModal('details'); }}><img src={property.images[0] || logo} alt={property.title} /><span className="view-icon"><Eye size={17} /></span></button><div className="card-body"><h3>{property.title}</h3><div className="card-location"><MapPin size={14} /> {property.city} — {property.district}{property.street && ` — ${property.street}`}</div><p className="card-description">{property.notes || `عرض عقاري مميز في ${property.city || 'موقع مميز'}، تواصل معنا لمعرفة التفاصيل.`}</p><strong className="card-price">{formatPrice(property.price, property.listing_type, property.rent_period)}</strong>{property.area > 0 && <span className="card-area"><Layers3 size={13} /> {new Intl.NumberFormat('ar-SA').format(property.area)} م²</span>}<div className="card-actions"><a className="location-action" href={property.latitude && property.longitude ? `https://www.google.com/maps/search/?api=1&query=${property.latitude},${property.longitude}` : 'https://goo.gl/maps/hP8rVmqhAiBm2XRcA'} target="_blank" rel="noreferrer"><Navigation size={15} /> الموقع</a><a className="whatsapp-action" href={`https://wa.me/966${whatsappNumber.replace(/^0/, '')}?text=${encodeURIComponent(`السلام عليكم ورحمة الله وبركاته، أنا مهتم بالإعلان رقم ${property.serial_number ?? ''}`)}`} target="_blank" rel="noreferrer"><MessageCircle size={15} /> WhatsApp</a><button className="share-action" onClick={() => { void navigator.share?.({ title: property.title, text: property.title, url: `${window.location.origin}/?property=${property.id}` }); }}><Share2 size={15} /> مشاركة</button></div><div className="card-owner">بواسطة {property.created_by_name}</div>{(isAdmin || staff?.id === property.created_by_staff_id) && <div className="owner-actions"><button onClick={() => openEditForm(property)}><FilePenLine size={14} /> تعديل</button><button onClick={() => void deleteProperty(property)}><Trash2 size={14} /> حذف</button></div>}</div></article>)}</div>}
+        <section className="listings-section listing-results"><div className="section-top"><div><span className="eyebrow">مكتبة العروض</span><h2>العروض العقارية</h2></div><div className="section-actions">{isAdmin && <button className="outline-button" onClick={() => setModal('staff')}><Users size={15} /> إدارة الموظفين</button>}{staff && <button className="primary-button small" onClick={openNewForm}><Plus size={17} /> إضافة عقار</button>}</div></div><div className="results-meta"><span>{visibleProperties.length} عرض متاح</span><button className="refresh-button" onClick={() => window.location.reload()}><RefreshCw size={14} /> تحديث</button></div>
+          {loading ? <div className="empty-state"><span className="loader" /> جاري تحميل العقارات</div> : visibleProperties.length === 0 ? <div className="empty-state"><Building2 size={38} /><p>لا توجد عقارات مطابقة للبحث</p><small>جرّب تغيير خيارات البحث أو التصنيف.</small></div> : <div className="property-grid">{visibleProperties.map((property) => <article className="property-card" key={property.id}><div className="card-topline"><span className="serial-badge">#{property.serial_number ?? '—'}</span><span className={`listing-badge ${property.listing_type}`}>{formatListingLabel(property.listing_type, property.rent_period)}</span></div><button className="card-image" onClick={() => { setSelected(property); setModal('details'); }}><img src={property.images[0] || logo} alt={property.title} /><span className="view-icon"><Eye size={17} /></span></button><div className="card-body"><h3>{property.title}</h3><div className="card-location"><MapPin size={14} /> {property.city} — {property.district}{property.street && ` — ${property.street}`}</div><p className="card-description">{property.notes || `عرض عقاري مميز في ${property.city || 'موقع مميز'}، تواصل معنا لمعرفة التفاصيل.`}</p><strong className="card-price">{formatPrice(property.price, property.listing_type, property.rent_period)}</strong>{property.area > 0 && <span className="card-area"><Layers3 size={13} /> {new Intl.NumberFormat('ar-SA').format(property.area)} م²</span>}<div className="card-actions"><a className="location-action" href={property.latitude && property.longitude ? `https://www.google.com/maps/search/?api=1&query=${property.latitude},${property.longitude}` : 'https://goo.gl/maps/hP8rVmqhAiBm2XRcA'} target="_blank" rel="noreferrer"><Navigation size={15} /> الموقع</a><a className="whatsapp-action" href={whatsappUrl(publisherPhone(property), `السلام عليكم ورحمة الله وبركاته، أنا مهتم بالإعلان رقم ${property.serial_number ?? ''}`)} target="_blank" rel="noreferrer"><MessageCircle size={15} /> WhatsApp</a><button className="share-action" onClick={() => { void navigator.share?.({ title: property.title, text: property.title, url: `${window.location.origin}/?property=${property.id}` }); }}><Share2 size={15} /> مشاركة</button></div><div className="card-owner">بواسطة {property.publisher_name || property.created_by_name}</div>{(isAdmin || staff?.id === property.created_by_staff_id) && <div className="owner-actions"><button onClick={() => openEditForm(property)}><FilePenLine size={14} /> تعديل</button><button onClick={() => void deleteProperty(property)}><Trash2 size={14} /> حذف</button></div>}</div></article>)}</div>}
         </section>
 
         <section className="office-section"><div className="office-copy"><span className="eyebrow">موقع المكتب</span><h2>درة الهجرة للعقارات</h2><p>الجوال متاح يومياً من 9:00 صباحاً إلى 12:00 ظهراً، ومن صلاة العصر حتى 12:00 ليلاً.</p><p>موقع المكتب متاح خلال ساعات التواصل المذكورة أعلاه.</p><a className="outline-button" href="https://goo.gl/maps/hP8rVmqhAiBm2XRcA" target="_blank" rel="noreferrer"><MapPin size={17} /> فتح الموقع في قوقل ماب</a></div><div className="map-frame"><OfficeMap /></div></section>
       </main>
 
       <footer className="site-footer"><div className="footer-inner"><div className="footer-brand"><img src={logo} alt="" /><span>مكتب درة الهجرة للعقارات</span></div><div className="footer-contact"><a href={`tel:${officePhone}`}><MessageCircle size={17} /> {officePhone}</a><a href="https://goo.gl/maps/hP8rVmqhAiBm2XRcA" target="_blank" rel="noreferrer"><MapPin size={17} /> موقع المكتب</a></div><button className="staff-link" onClick={() => staff ? handleLogout() : (setLoginMessage(''), setModal('login'))}><LockKeyhole size={12} /> {staff ? 'تسجيل الخروج' : 'دخول الموظفين'}</button></div><div className="copyright">© {new Date().getFullYear()} درة الهجرة للعقارات</div></footer>
-      {helpVisible && <div className="help-bubble"><button onClick={() => setHelpVisible(false)} aria-label="إغلاق"><X size={15} /></button><span>تحتاج مساعدة؟ تواصل معنا</span></div>}<a className="floating-whatsapp" href={`https://wa.me/966${whatsappNumber.replace(/^0/, '')}`} target="_blank" rel="noreferrer" aria-label="واتساب"><MessageCircle size={24} /></a>{notice && <div className="toast" role="status">{notice}</div>}
+      {helpVisible && <div className="help-bubble"><button onClick={() => setHelpVisible(false)} aria-label="إغلاق"><X size={15} /></button><span>تحتاج مساعدة؟ تواصل معنا</span></div>}<a className="floating-whatsapp" href={whatsappUrl(whatsappNumber)} target="_blank" rel="noreferrer" aria-label="واتساب"><MessageCircle size={24} /></a>{notice && <div className="toast" role="status">{notice}</div>}
 
-      {modal && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setModal(null); }}><div className={`modal ${modal === 'form' ? 'wide-modal' : ''}`}>
+      {modal && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setModal(null); }}><div className={`modal ${modal === 'form' || modal === 'staff' ? 'wide-modal' : ''}`}>
         <button className="modal-close" onClick={() => setModal(null)} aria-label="إغلاق"><X size={19} /></button>
         {modal === 'login' && <div className="login-modal"><div className="modal-icon"><LockKeyhole size={22} /></div><span className="eyebrow">بوابة المكتب</span><h2>دخول الموظفين</h2><p>استخدم رقم الجوال وكلمة المرور المعتمدة.</p><form onSubmit={handleLogin}><label>رقم الجوال<input name="phone" inputMode="tel" required placeholder="05xxxxxxxx" /></label><label>كلمة المرور<input name="password" type="password" required /></label>{loginMessage && <div className="form-error">{loginMessage}</div>}<button className="primary-button submit-button">دخول <ChevronDown size={18} /></button></form></div>}
-        {modal === 'details' && selected && <div className="details-modal"><div className="details-image"><img src={selected.images[0] || logo} alt={selected.title} /></div><span className={`listing-badge ${selected.listing_type}`}>{formatListingLabel(selected.listing_type, selected.rent_period)}</span><span className="serial-badge">#{selected.serial_number ?? '—'}</span><div className="card-location"><MapPin size={14} /> {selected.city} — {selected.district} {selected.street && `— ${selected.street}`}</div><p className="advertiser-line">المعلن: <strong>{selected.created_by_name}</strong></p><h2>{selected.title}</h2><strong className="detail-price">{formatPrice(selected.price, selected.listing_type, selected.rent_period)}</strong>{selected.area > 0 && <div className="detail-area"><Layers3 size={15} /> المساحة: {new Intl.NumberFormat('ar-SA').format(selected.area)} م²</div>}{selected.property_type === 'شقة' && <div className="detail-grid"><span>عدد الغرف <b>{selected.rooms}</b></span><span>الحمامات <b>{selected.bathrooms}</b></span><span>الصالات <b>{selected.lounges}</b></span><span>المطابخ <b>{selected.kitchens}</b></span><span>الدور <b>{selected.floor_number}</b></span><span>عدد الأدوار <b>{selected.floors}</b></span><span>مصعد <b>{selected.has_elevator ? 'نعم' : 'لا'}</b></span><span>سطح <b>{selected.has_roof ? 'نعم' : 'لا'}</b></span></div>}{selected.notes && <p className="notes">{selected.notes}</p>}<a className="primary-button submit-button" href={`https://wa.me/966${whatsappNumber.replace(/^0/, '')}?text=${encodeURIComponent(`السلام عليكم ورحمة الله وبركاته، أنا مهتم بالإعلان رقم ${selected.serial_number ?? ''}`)}`} target="_blank" rel="noreferrer"><MessageCircle size={18} /> تواصل عبر واتساب</a></div>}
-        {modal === 'form' && <form className="property-form" onSubmit={(event) => void saveProperty(event)}><div className="form-heading"><div><span className="eyebrow">إدارة العروض</span><h2>{selected ? 'تعديل العقار' : 'إضافة عقار جديد'}</h2></div><span className="secure-note"><LockKeyhole size={14} /> {staff?.display_name}</span></div><div className="form-grid"><label className="full">عنوان العقار<input required value={form.title} onChange={(event) => updateForm('title', event.target.value)} placeholder="مثال: فيلا عائلية بحي النخيل" /></label><label>نوع العرض<select value={form.listing_type} onChange={(event) => updateForm('listing_type', event.target.value)}><option value="sale">بيع</option><option value="rent">إيجار</option></select></label>{form.listing_type === 'rent' && <label>مدة الإيجار<select value={form.rent_period ?? 'annual'} onChange={(event) => updateForm('rent_period', event.target.value as RentPeriod)}><option value="monthly">شهري</option><option value="annual">سنوي</option></select></label>}<label>نوع العقار<select value={form.property_type} onChange={(event) => updateForm('property_type', event.target.value)}>{allPropertyTypes.map((type) => <option key={type}>{type}</option>)}</select></label><label>المدينة<input required value={form.city} onChange={(event) => updateForm('city', event.target.value)} /></label><label>الحي<input required value={form.district} onChange={(event) => updateForm('district', event.target.value)} /></label><label>الشارع<input value={form.street} onChange={(event) => updateForm('street', event.target.value)} /></label><label>السعر<input required type="number" min="0" value={form.price} onChange={(event) => updateForm('price', Number(event.target.value))} /></label><label>المساحة (م²)<input type="number" min="0" value={form.area} onChange={(event) => updateForm('area', Number(event.target.value))} /></label>{form.property_type === 'شقة' && [['rooms','عدد الغرف'],['bathrooms','الحمامات'],['lounges','الصالات'],['kitchens','المطابخ'],['floor_number','الدور'],['floors','عدد الأدوار']].map(([key, label]) => <label key={key}>{label}<input type="number" min="0" value={form[key as keyof FormState] as number} onChange={(event) => updateForm(key as keyof FormState, Number(event.target.value))} /></label>)}{form.property_type === 'شقة' && <label className="check"><input type="checkbox" checked={form.has_roof} onChange={(event) => updateForm('has_roof', event.target.checked)} /> يوجد سطح</label>}{form.property_type === 'شقة' && <label className="check"><input type="checkbox" checked={form.has_elevator} onChange={(event) => updateForm('has_elevator', event.target.checked)} /> يوجد مصعد</label>}<label className="full">ملاحظات إضافية<textarea value={form.notes} onChange={(event) => updateForm('notes', event.target.value)} rows={3} /></label><label className="full file-label"><span>صور العقار <small>علامة رمادية واضحة في الزاوية اليمنى السفلى</small></span><input type="file" accept="image/*" multiple onChange={(event) => void handleFiles(event.target.files)} /></label></div><div className="image-previews">{form.images.map((image, index) => <div key={`${image.slice(0, 20)}-${index}`}><img src={image} alt={`صورة ${index + 1}`} /><button type="button" onClick={() => updateForm('images', form.images.filter((_, imageIndex) => imageIndex !== index))}><X size={14} /></button></div>)}</div><div className="location-heading"><span>موقع العقار</span><small>اضغط على الخريطة لوضع الدبوس، وسيتم استخراج المدينة والحي والشارع تلقائياً.</small></div><LocationPicker latitude={form.latitude} longitude={form.longitude} onSelect={(latitude, longitude) => void selectLocation(latitude, longitude)} />{form.latitude !== null && <div className="location-row"><MapPinned size={16} /><span>{form.latitude.toFixed(5)}, {form.longitude?.toFixed(5)}</span></div>}{notice && <div className="form-note">{notice}</div>}<div className="form-footer"><button type="button" className="cancel-button" onClick={() => setModal(null)}>إلغاء</button><button className="primary-button" disabled={saving}>{saving ? 'جارٍ الحفظ...' : 'حفظ العقار'}</button></div></form>}
+        {modal === 'staff' && isAdmin && staff && <StaffManager currentStaffId={staff.id} />}
+        {modal === 'details' && selected && <div className="details-modal"><div className="details-image"><img src={selected.images[0] || logo} alt={selected.title} /></div><span className={`listing-badge ${selected.listing_type}`}>{formatListingLabel(selected.listing_type, selected.rent_period)}</span><span className="serial-badge">#{selected.serial_number ?? '—'}</span><div className="card-location"><MapPin size={14} /> {selected.city} — {selected.district} {selected.street && `— ${selected.street}`}</div><p className="advertiser-line">المعلن: <strong>{selected.publisher_name || selected.created_by_name}</strong></p><h2>{selected.title}</h2><strong className="detail-price">{formatPrice(selected.price, selected.listing_type, selected.rent_period)}</strong>{selected.area > 0 && <div className="detail-area"><Layers3 size={15} /> المساحة: {new Intl.NumberFormat('ar-SA').format(selected.area)} م²</div>}{selected.property_type === 'شقة' && <div className="detail-grid"><span>عدد الغرف <b>{selected.rooms}</b></span><span>الحمامات <b>{selected.bathrooms}</b></span><span>الصالات <b>{selected.lounges}</b></span><span>المطابخ <b>{selected.kitchens}</b></span><span>الدور <b>{selected.floor_number}</b></span><span>عدد الأدوار <b>{selected.floors}</b></span><span>مصعد <b>{selected.has_elevator ? 'نعم' : 'لا'}</b></span><span>سطح <b>{selected.has_roof ? 'نعم' : 'لا'}</b></span></div>}{selected.notes && <p className="notes">{selected.notes}</p>}{staff && <OwnerInfo propertyId={selected.id} />}<a className="primary-button submit-button" href={whatsappUrl(publisherPhone(selected), `السلام عليكم ورحمة الله وبركاته، أنا مهتم بالإعلان رقم ${selected.serial_number ?? ''}`)} target="_blank" rel="noreferrer"><MessageCircle size={18} /> تواصل عبر واتساب</a></div>}
+        {modal === 'form' && <form className="property-form" onSubmit={(event) => void saveProperty(event)}><div className="form-heading"><div><span className="eyebrow">إدارة العروض</span><h2>{selected ? 'تعديل العقار' : 'إضافة عقار جديد'}</h2></div><span className="secure-note"><LockKeyhole size={14} /> {staff?.display_name}</span></div><div className="form-grid"><label className="full">عنوان العقار<input required value={form.title} onChange={(event) => updateForm('title', event.target.value)} placeholder="مثال: فيلا عائلية بحي النخيل" /></label><label>نوع العرض<select value={form.listing_type} onChange={(event) => updateForm('listing_type', event.target.value)}><option value="sale">بيع</option><option value="rent">إيجار</option></select></label>{form.listing_type === 'rent' && <label>مدة الإيجار<select value={form.rent_period ?? 'annual'} onChange={(event) => updateForm('rent_period', event.target.value as RentPeriod)}><option value="monthly">شهري</option><option value="annual">سنوي</option><option value="two_installments">على دفعتين</option></select></label>}<label>نوع العقار<select value={form.property_type} onChange={(event) => updateForm('property_type', event.target.value)}>{allPropertyTypes.map((type) => <option key={type}>{type}</option>)}</select></label><label>المدينة<input required value={form.city} onChange={(event) => updateForm('city', event.target.value)} /></label><label>الحي<input required value={form.district} onChange={(event) => updateForm('district', event.target.value)} /></label><label>الشارع<input value={form.street} onChange={(event) => updateForm('street', event.target.value)} /></label><label>{form.listing_type === 'rent' && form.rent_period === 'two_installments' ? 'السعر على الدفعة الواحدة' : 'السعر'}<input required type="number" min="0" value={form.price} onChange={(event) => updateForm('price', Number(event.target.value))} /></label><label>المساحة (م²)<input type="number" min="0" value={form.area} onChange={(event) => updateForm('area', Number(event.target.value))} /></label>{form.property_type === 'شقة' && [['rooms','عدد الغرف'],['bathrooms','الحمامات'],['lounges','الصالات'],['kitchens','المطابخ'],['floor_number','الدور'],['floors','عدد الأدوار']].map(([key, label]) => <label key={key}>{label}<input type="number" min="0" value={form[key as keyof FormState] as number} onChange={(event) => updateForm(key as keyof FormState, Number(event.target.value))} /></label>)}{form.property_type === 'شقة' && <label className="check"><input type="checkbox" checked={form.has_roof} onChange={(event) => updateForm('has_roof', event.target.checked)} /> يوجد سطح</label>}{form.property_type === 'شقة' && <label className="check"><input type="checkbox" checked={form.has_elevator} onChange={(event) => updateForm('has_elevator', event.target.checked)} /> يوجد مصعد</label>}<label>اسم المالك <small>(للموظفين فقط)</small><input required value={form.owner_name} onChange={(event) => updateForm('owner_name', event.target.value)} /></label><label>رقم جوال المالك <small>(للموظفين فقط)</small><input required inputMode="tel" value={form.owner_phone} onChange={(event) => updateForm('owner_phone', event.target.value)} /></label><label className="full">ملاحظات إضافية<textarea value={form.notes} onChange={(event) => updateForm('notes', event.target.value)} rows={3} /></label><label className="full file-label"><span>صور العقار <small>علامة مائية بيضاء شفافة في منتصف الصورة</small></span><input type="file" accept="image/*" multiple onChange={(event) => void handleFiles(event.target.files)} /></label></div><div className="image-previews">{form.images.map((image, index) => <div key={`${image.slice(0, 20)}-${index}`}><img src={image} alt={`صورة ${index + 1}`} /><button type="button" onClick={() => updateForm('images', form.images.filter((_, imageIndex) => imageIndex !== index))}><X size={14} /></button></div>)}</div><div className="location-heading"><span>موقع العقار</span><small>اضغط على الخريطة لوضع الدبوس، وسيتم استخراج المدينة والحي والشارع تلقائياً.</small></div><LocationPicker latitude={form.latitude} longitude={form.longitude} onSelect={(latitude, longitude) => void selectLocation(latitude, longitude)} />{form.latitude !== null && <div className="location-row"><MapPinned size={16} /><span>{form.latitude.toFixed(5)}, {form.longitude?.toFixed(5)}</span></div>}{notice && <div className="form-note">{notice}</div>}<div className="form-footer"><button type="button" className="cancel-button" onClick={() => setModal(null)}>إلغاء</button><button className="primary-button" disabled={saving}>{saving ? 'جارٍ الحفظ...' : 'حفظ العقار'}</button></div></form>}
       </div></div>}
     </div>
   );

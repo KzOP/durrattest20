@@ -127,3 +127,15 @@ button { cursor: pointer; }
 .error-boundary p { color: #526170; }
 .error-boundary pre { overflow-x: auto; padding: 12px; background: #e9edf1; text-align: left; }
 .error-boundary button { border: 0; border-radius: 4px; padding: 10px 16px; color: #fff; background: #102841; }
+.owner-info { margin: 0 0 18px; padding: 14px; background: var(--surface-2); border: 1px dashed var(--gold); border-radius: 10px; display: grid; gap: 8px; }
+.owner-info small { color: var(--muted); font-size: 11px; }
+.owner-info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; color: var(--muted); font-size: 12px; }
+.owner-info-grid b { display: block; margin-top: 4px; color: var(--text); font-size: 13px; }
+.staff-manager { text-align: right; }
+.staff-manager .form-heading { margin-bottom: 16px; }
+.staff-manager .form-note, .staff-manager .form-error { margin-bottom: 12px; }
+.staff-manager .staff-row > div { min-width: 0; }
+.staff-manager .staff-row small { display: block; }
+.staff-manager .staff-row input { width: 100%; }
+.staff-manager .primary-button:disabled, .staff-manager .danger-button:disabled { opacity: .5; cursor: not-allowed; }
+.property-form label small { color: var(--gold); font-size: 9px; margin-inline-start: 4px; }

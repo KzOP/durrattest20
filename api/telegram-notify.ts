@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { authenticateStaff, bearerToken, firestoreDocumentsUrl } from '../server/staff-auth';
 
 type ApiRequest = IncomingMessage & { body?: unknown };
 type ApiResponse = ServerResponse & {
@@ -19,7 +20,21 @@ type FirestoreDocument = {
   fields?: Record<string, FirestoreValue>;
 };
 
+type RentPeriod = 'monthly' | 'annual' | 'two_installments';
+
 const PRODUCTION_APP_URL = 'https://durrattest18.vercel.app';
+
+const rentPeriodPriceText: Record<RentPeriod, string> = {
+  monthly: 'شهرياً',
+  annual: 'سنوياً',
+  two_installments: 'على الدفعة الواحدة',
+};
+
+const rentPeriodLabelText: Record<RentPeriod, string> = {
+  monthly: 'شهري',
+  annual: 'سنوي',
+  two_installments: 'على دفعتين',
+};
 
 function stringField(fields: Record<string, FirestoreValue>, name: string) {
   const value = fields[name]?.stringValue;
@@ -76,13 +91,9 @@ function isSaleLabel(value: string) {
   return /(?:^|[^a-z])(?:sale|sell)(?:$|[^a-z])|بيع/i.test(normalizedLabel(value));
 }
 
-function rentPeriodFromFields(fields: Record<string, FirestoreValue>): 'monthly' | 'annual' {
-  const periodFields = ['rent_period', 'rental_period', 'lease_period', 'rentPeriod', 'payment_period', 'subType', 'offerType', 'offer_type', 'listing_type'];
-  for (const name of periodFields) {
-    const value = normalizedLabel(stringField(fields, name));
-    if (/(?:^|[^a-z])(?:monthly|month)(?:$|[^a-z])|شهري|شهر/i.test(value)) return 'monthly';
-    if (/(?:^|[^a-z])(?:annual|yearly|year)(?:$|[^a-z])|سنوي|سنة/i.test(value)) return 'annual';
-  }
+function rentPeriodFromFields(fields: Record<string, FirestoreValue>): RentPeriod {
+  const value = stringField(fields, 'rent_period');
+  if (value === 'monthly' || value === 'annual' || value === 'two_installments') return value;
   return 'annual';
 }
 
@@ -169,10 +180,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const authorization = req.headers.authorization;
-  const idToken = typeof authorization === 'string' && authorization.startsWith('Bearer ')
-    ? authorization.slice('Bearer '.length).trim()
-    : '';
+  const idToken = bearerToken(req.headers.authorization);
   if (!idToken) return res.status(401).json({ error: 'Unauthorized' });
 
   const apiKey = process.env.VITE_FIREBASE_API_KEY;
@@ -190,44 +198,18 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
   }
 
   try {
-    const identityResponse = await fetch(
-      `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(apiKey)}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ idToken }),
-      },
-    );
-    if (!identityResponse.ok) return res.status(401).json({ error: 'Unauthorized' });
-    const identity = await identityResponse.json() as {
-      users?: Array<{ localId?: string; disabled?: boolean }>;
-    };
-    const user = identity.users?.[0];
-    const uid = user?.localId;
-    if (!uid || user.disabled === true) return res.status(401).json({ error: 'Unauthorized' });
+    const staff = await authenticateStaff(idToken, apiKey, projectId);
+    if (!staff.ok) return res.status(staff.status).json({ error: staff.error });
 
-    const firestoreBase = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/databases/(default)/documents`;
-    const firestoreHeaders = { Authorization: `Bearer ${idToken}` };
-    const employeeResponse = await fetch(
-      `${firestoreBase}/employees/${encodeURIComponent(uid)}`,
-      { headers: firestoreHeaders },
-    );
-    if (!employeeResponse.ok) return res.status(403).json({ error: 'Active employee required' });
-    const employee = await employeeResponse.json() as FirestoreDocument;
-    const employeeFields = employee.fields ?? {};
-    const role = stringField(employeeFields, 'role');
-    if (employeeFields.active?.booleanValue !== true || !['employee', 'super_admin'].includes(role)) {
-      return res.status(403).json({ error: 'Active employee required' });
-    }
-
+    const firestoreBase = firestoreDocumentsUrl(projectId);
     const propertyResponse = await fetch(
       `${firestoreBase}/properties/${encodeURIComponent(propertyId)}`,
-      { headers: firestoreHeaders },
+      { headers: { Authorization: `Bearer ${idToken}` } },
     );
     if (!propertyResponse.ok) return res.status(404).json({ error: 'Property not found' });
     const property = await propertyResponse.json() as FirestoreDocument;
     const fields = property.fields ?? {};
-    if (stringField(fields, 'created_by_staff_id') !== uid) {
+    if (stringField(fields, 'created_by_staff_id') !== staff.uid) {
       return res.status(403).json({ error: 'Property owner required' });
     }
 
@@ -235,8 +217,8 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     const propertyType = limitText(stringField(fields, 'property_type') || 'غير محدد', 60);
     const rentPeriod = rentPeriodFromFields(fields);
     const isRent = isRentListing(fields);
-    const listingLabel = isRent ? `للإيجار (${rentPeriod === 'monthly' ? 'شهري' : 'سنوي'})` : 'للبيع';
-    const price = `${new Intl.NumberFormat('ar-SA').format(numberField(fields, 'price'))} ر.س${isRent ? ` ${rentPeriod === 'monthly' ? 'شهرياً' : 'سنوياً'}` : ''}`;
+    const listingLabel = isRent ? `للإيجار (${rentPeriodLabelText[rentPeriod]})` : 'للبيع';
+    const price = `${new Intl.NumberFormat('ar-SA').format(numberField(fields, 'price'))} ر.س${isRent ? ` ${rentPeriodPriceText[rentPeriod]}` : ''}`;
     const city = limitText(stringField(fields, 'city'), 60);
     const district = limitText(stringField(fields, 'district'), 60);
     const serialNumber = numberField(fields, 'serial_number');
@@ -247,9 +229,9 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       || propertyType.includes('شقة')
       || propertyType.includes('شقق');
 
-const apartmentLines = isApartment
+    const apartmentLines = isApartment
       ? [
-          '', // سطر فارغ جمالي قبل تفاصيل الشقة
+          '',
           ...[
             ['غرف النوم', ['bedrooms', 'bedroom_count', 'rooms']],
             ['الصالات', ['lounges', 'living_rooms', 'halls']],
@@ -277,7 +259,7 @@ const apartmentLines = isApartment
       serialNumber
         ? `رقم الإعلان: ${new Intl.NumberFormat('ar-SA').format(serialNumber)}`
         : '',
-      '', // سطر فارغ جمالي قبل الرابط ليكون مفصولاً تماماً مثل صورتك
+      '',
       `<a href="${escapeHtml(detailsUrl)}">عرض تفاصيل العقار</a>`,
     ].filter(Boolean).flat().join('\n');
     const imageUrl = firstImageUrl(fields);
